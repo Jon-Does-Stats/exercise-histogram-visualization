@@ -1,0 +1,694 @@
+---
+title: 'Individual Research Project - Histogram Visualization Tutorial'
+author: "Jonathan Schierbaum"
+date: "FALL 2020"
+output:
+  html_document: default
+  pdf_document: default
+highlight: pygments
+---
+<style>
+pre {
+  overflow-x: auto;
+}
+pre code {
+  word-wrap: normal;
+  white-space: pre;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, tidy = FALSE, size = "small", message = FALSE, fig.align = 'center') 
+options(width = 999)
+
+packages <- c("knitr", "dplyr", "lubridate", 
+              "reshape2", "ggplot2", "ggnewscale", 
+              "gganimate")
+
+missing <- packages[!(packages %in% installed.packages())]
+
+if(length(missing) > 0) install.packages(missing)
+
+invisible(suppressMessages(lapply(packages, library, character.only = TRUE)))
+
+rm(packages, missing)
+```
+
+# Sharpening Your Histogram Game
+
+Histograms are often cited as the most used visualization by the statistics community.
+
+I am going to show you a few simple techniques that you can implement easily to maximize a histogram's potential for interpretation.
+
+
+## Data description...it's a bit strange!
+
+**Read about the data**
+[link](https://www.google.com/covid19/mobility/)
+
+**Download the data, aggregated for you**
+[link](https://www.kaggle.com/douglaskgaraujo/opportunity-insights-real-time-economic-tracker-us)
+
+
+**The data we're using**
+Measures the change in time spent at home, by day.
+
+Strangely, each day is compared against the median value for that day of the week the 5‑week period Jan 3 – Feb 6, 2020. 
+
+**Because people already spend much of the day at places of residence (even on workdays), the capacity for change isn’t so large.**
+
+For example: 
+
+In a given day during pandemic, let's say a hypothetical person before the pandemic spent 9 hours outside the home, and 15 hours in the home. 
+
+During the pandemic, If they then spent their entire lives at home, their time in residence would only increase by 60%.
+
+
+**Complicated, difficult to interpret dataset! Histograms can still help!**
+
+### Load data
+
+```{r load_data}
+fp_raw_data <- "~/GitHub/exercise-histogram-visualization/raw_data/"
+
+fp_figures <- "~/GitHub/exercise-histogram-visualization/figures/"
+
+
+# loading the data in
+data1   <- read.csv(paste0(fp_raw_data, "Google Mobility - City - Daily.csv"), 
+                    stringsAsFactors=F)                                         # stringsAsFactors=FALSE best for beginners
+                                                                                # to set their own factors.
+cityid  <- read.csv(paste0(fp_raw_data, "GeoIDs - City.csv"), 
+                    stringsAsFactors=F)                                         
+
+data2   <- read.csv(paste0(fp_raw_data, "Google Mobility - State - Daily.csv"), 
+                    stringsAsFactors=F)  
+
+stateid <- read.csv(paste0(fp_raw_data, "GeoIDs - State.csv"), 
+                    stringsAsFactors=F)                                         # Geo-ID files contain identifiers we will need.
+
+
+# add city and state identifiers
+city_data  <- left_join(data1, cityid, by = "cityid")                           # left-join finds rows with matching entries
+state_data <- left_join(data2, stateid, by = "statefips")                       # in the cityid column, and adds the 2nd dataframe's
+                                                                                # columns to the first
+ 
+# make the date more manageable
+city_data  <- mutate(city_data, date = make_date(year, month, day))             # using lubridate to make a new, properly coded date.
+city_data  <- mutate(city_data, month = month(date, label = T))                 # using that new date to make new month and day columns.
+city_data  <- mutate(city_data, weekday = wday(date, label = T))                # label = T adds abbreviations for days instead of 1,2,3...
+
+state_data <- mutate(state_data, date = make_date(year, month, day))
+state_data <- mutate(state_data, month = month(date, label = T))
+state_data <- mutate(state_data, weekday = wday(date, label = T))               
+
+
+# remove weekends
+city_wk     <- filter(city_data,                                                # filter() + between() is very useful
+                      between(wday(date), 2, 6))                                # wday() returns day of week, between() keeps weekdays
+
+city_wkend  <- filter(city_data,                                                # filter weekends to separate dataframe
+                      wday(date) == 1 |wday(date) == 7)
+
+state_wk    <- filter(state_data,                                               # repeat for state data.
+                      between(wday(date), 2, 6))
+
+state_wkend <- filter(state_data, 
+                      wday(date) == 1 |wday(date) == 7)
+
+# exploratory plot                                                                  # using ggplot2 is like using building blocks
+
+png(file=paste0(fp_figures, "scatterplot_all_data", ".png"), width = 8, height = 5, unit = "in", res = 225, antialias = "cleartype")
+
+ggplot(data = state_wk, aes(date, gps_residential)) +                               # the + sign adds another element
+  scale_y_continuous(labels = scales::percent) +                                    # your plot not coming up? check your chain of 
+  geom_point() +                                                                    # + signs.
+                                                                                    # scale_y_continuous(labels = scales::percent)
+  ggtitle("Daily Hours at Home Across All States, Feb - Sep '20",                   # changes our axis to percent.
+        subtitle = "each data point is a statewide weekday average (by day), compared to january '20 median levels" ) +  
+  xlab("Month of Record") +                                                         
+  ylab("Daily Changes in Hours Home (Day of Week vs. Jan Median)")
+
+dev.off()
+```
+
+## Histogram introduction
+
+```{r hist_intro}
+# Let's start with a look at cities.
+
+# make city data frame, filter to weeks of interest
+city_target <- filter(city_wk,                                                  # filtering weeks 11-14 
+                      between(isoweek(date), 11,14))                            # wrapping date in isoweek() returns week of year.
+                                                                                # I use isoweek() because its weeks start on monday
+
+# double check for filter errors
+length(unique(city_target$date))                                                # expecting 4 weeks x 5 days = 20 days
+length(unique(city_target$weekday))
+
+
+# week check, locate starting week
+chk <- as.Date(c("2020-03-02", "2020-03-09", "2020-03-16"))                     # this data is from 3/9/2020 to 4/3/2020
+isoweek(chk) 
+
+
+# wow, a histogram!                                                             # to change previous plot to histogram, remove
+png(file=paste0(fp_figures, "intro_histogram", ".png"), 
+    width = 8, height = 5, unit = "in", res = 225, antialias = "cleartype")
+
+ggplot(data = city_target, aes(gps_residential)) +                              # isoweek(date) from the aesthetic mapping
+  geom_histogram() +                                                            # and remove geom_point() and add geom_hist()  
+  ggtitle("Weekday Hours at Home Across 53 U.S. Cities in March and April 2020",
+          subtitle = "each data point is a citywide weekday average (by day), compared to january '20 median levels" ) +
+  
+  xlab("Daily Changes in Hours Home (Each Weekday vs. Jan Median)") + 
+  ylab("No. of Days"
+ ) + 
+  
+# Add a median line  
+  geom_vline(aes(xintercept=median(gps_residential)),                           # a sneak peak. geom_vline() needs its own x value mapping!
+             color="red", linetype="dashed", size=1 )                           # anything we put inside aes() within a geom layer overrides
+                                                                                # the original aes settings from the ggplot2 call.
+dev.off()
+```
+### Histograms are not bar charts
+
+Visually, they are similar. Both use bars placed side-by-side, and bar height is a main visual cue, but the small differences between them change interpretation significantly.
+
+**Bar charts**
+Shows categorical data (and sometimes time series data) on the x axis.
+
+The visual cue for a value in a bar chart is bar height.
+
+Primarily used to show illustrate categories.
+
+**histograms**
+Show a continuous variable on the horizontal axis. 
+ 
+Uses area (i.e. width times height) as a visual cue.
+
+Primarily used to show illustrate distributions.
+
+The width of bars can vary, (i.e. to see the long-tail of a distribution)
+
+This means you read the two chart types differently. The bar chart is for categories, and the histogram is for distributions. 
+
+**Main note: Bar charts and histograms are different.**
+
+```{r hist_vs_bar, fig.height=6}
+# Bar charts aren't histograms! Bar chart EX; cities with highest average
+
+avgchg <- aggregate(gps_residential ~ cityname, data=city_target, mean)         # aggregate() is grouping by city name and returning 1
+avgchg <- avgchg[order(avgchg$gps_residential, decreasing=TRUE),]               # value per city. order() ranks those values. 
+
+                                                                                # reorder() gives some structure to the plot
+
+ggplot(data = avgchg, aes(reorder(cityname, gps_residential),                   # we're mapping the y value ourselves now (no count),
+                          gps_residential)) +                                   # We must add y values inside aes()  
+  geom_bar(stat="identity") +                                                   # stat = ".. makes the bar heights reflect their value 
+                                                                                # within the data (used within geom)
+  coord_flip() +                                                                # coord_flip() rotates the graph, would look even more like
+                                                                                # a hist without this.
+  ggtitle("Weekday Hours at Home Across 53 U.S. Cities in March and April 2020",               
+        subtitle = "the mean value of citywide daily records between 3/9/20 to 4/3/20, compared to january '20 median levels" ) +          
+  ylab("Daily Change in Hours Home (Weekday vs. Jan Median)") +  
+  xlab("Select U.S. Cities")
+
+# Moving forward
+png(file=paste0(fp_figures, "bar_chart_ex", ".png"), 
+    width = 9, height = 6.5, unit = "in", res = 225, antialias = "cleartype")
+
+ggplot(data = avgchg, aes(reorder(cityname, gps_residential) , gps_residential)) +
+  geom_bar(stat="identity") + 
+  
+  geom_hline(aes(yintercept = mean(gps_residential)),                           # Notice usage of geom_hline(). The line is 
+             color="red",                                                       # horizontal until coord-flip. Also, notice the y intercept
+             linetype="dashed",                                                 # function is now mean(), and not median()
+             size=1) + 
+  
+  coord_flip() +
+  
+  geom_text(aes(x = "Phoenix", y = (avgchg[43,2] + 0.015)),                     # These text are just added to draw attention.
+            label="Phoenix", hjust = 0.75) +                                         # Align by setting their x value within the aes() to their name
+                                                                                # and their y value to their average, + a little offset.
+  geom_text(aes(x = "Phoenix", y = (avgchg[43,2] + 0.015), 
+            label = round(avgchg[43,2], digit = 3)), hjust = -0.75) +
+  
+  geom_text(aes(x = "San Diego", y = (avgchg[10,2] + 0.02)), 
+            label="San Diego", hjust = 0.75) + 
+  
+  geom_text(aes(x = "San Diego", y = (avgchg[10,2] + 0.02), 
+            label = round(avgchg[10,2], digit = 3)), hjust = -0.75) +
+
+  ggtitle("Weekday Hours at Home Across 53 U.S. Cities in March and April 2020",               
+        subtitle = "the mean value of citywide daily records between 3/9/20 to 4/3/20, compared to january '20 median levels" ) +          
+  ylab("Daily Change in Hours Home (Weekday vs. Jan Median)") +  
+  xlab("Select U.S. Cities")
+
+dev.off()
+```
+### Transparency helps with interpretation
+
+```{r main_hist_start}
+
+# let's look at San Diego & Phoenix, the first 100 weekdays of the period.
+yday(city_target[1,17])                                                         # yday() returns the day of year. Here, I'm looking
+                                                                                # at the first record of the previous dataframe
+sdph <- filter(city_wk,
+               between(yday(date), 69, 208) & cityname == "San Diego" |         # filter() keeps rows that match either condition, 
+               between(yday(date), 69, 208) & cityname == "Phoenix" )           # the conditions are split by | 
+
+# basic plot
+histplot <- ggplot(data = sdph, aes(gps_residential)) +                         # basic ggplot object
+scale_x_continuous(labels = scales::percent) +                                  # with histograms we scale the x axis
+  ggtitle("Weekday Hours at Home In Two Southwest Cities, 100 Days Of Change After 3/9/20",               
+        subtitle = "100 citywide weekday averages from san diego and phoenix, compared to january '20 median levels" ) +          
+        xlab("Daily Changes in Hours Home (Each Weekday vs. Jan Median)") +
+        ylab("No. of Days")
+
+
+# Tip #1: always add alpha
+png(file=paste0(fp_figures, "histogram_ex", ".png"), 
+    width = 8, height = 5, unit = "in", res = 225, antialias = "cleartype")
+
+histplot +  geom_histogram() 
+
+dev.off()
+
+png(file=paste0(fp_figures, "histogram_ex_iter_1", ".png"), 
+    width = 8, height = 5, unit = "in", res = 225, antialias = "cleartype")
+
+histplot +  geom_histogram(alpha = 0.5)                                         # adding alpha at the geom level ensures that only
+
+dev.off()                                                                       # the histogram bars will be affected.
+```
+### Cues that inform histogram interpretation
+
+For a single variable...
+
+**Shape**
+Is there a skew to the left or right, or a clump in the middle?
+
+Does it resemble a familiar distribution?
+
+**Span**
+Are there are lot of values clustered towards the maximums and minimums with nothing in between?
+
+What happens in between the maximum value and median? Do the values cluster towards the median and quickly increase?
+
+**Outliers**
+Histograms make them very easy to spot.
+
+## Useful histogram improvements
+
+### Adjust bin sizes
+
+```{r bin_sizes}
+
+#Tip #2: adjusting bins, binwidth and breaks
+histplot +  
+  geom_histogram(alpha = 0.5, bins = 20) +                                      # note: bins is within geom()
+  ggtitle("bins = 20")
+
+histplot + 
+  geom_histogram(alpha = 0.5, binwidth = 0.2) +                                 # note: binwidth is within geom() 
+  ggtitle("binwidth = 0.2")
+
+#mimic R plot default breaks
+defaultbins <- pretty(range(sdph$gps_residential),                              # This is the default behavior of hist()
+    n = nclass.Sturges(sdph$gps_residential), min.n = 1)                        # within base R, it returns a vector of breaks.
+
+histplot + 
+  geom_histogram(alpha = 0.5, breaks = defaultbins) +                           # note: breaks is within geom()
+  ggtitle("pretty sturges")
+
+#bins don't need to be equal...
+weirdbins <- sample(defaultbins, 10)                                            # sample() is just being used to randomly create
+                                                                                # different sized bins.
+histplot + 
+  geom_histogram(alpha = 0.5, breaks = weirdbins) +                             # breaks = somevector must be used for different
+  ggtitle("weirdbins")                                                          # sized bins.
+
+
+                                                                                
+# Moving on...
+histplot1 <- ggplot(data = sdph, aes(gps_residential)) +                            
+scale_x_continuous(labels = scales::percent) +                                     
+  ggtitle("Weekday Hours at Home In Two Southwest Cities, 100 Days Of Change After 3/9/20",               
+        subtitle = "100 citywide weekday averages from san diego and phoenix, compared to january '20 median levels" ) +          
+        xlab("Daily Changes in Hours Home (Each Weekday vs. Jan Median)") +
+        ylab("No. of Days") +
+  geom_histogram(alpha = 0.5, bins = 20)                                        # I chose 20 bins because I thought it looked best
+
+png(file=paste0(fp_figures, "histogram_ex_iter_2", ".png"), 
+    width = 8, height = 5, unit = "in", res = 225, antialias = "cleartype")
+
+histplot1
+
+dev.off()   
+``` 
+
+
+### Measures of central tendancy
+
+```{r median_lines}
+
+# Tip 3: add central tendency indicators (median)
+histplot1 + geom_vline(aes(xintercept=median(gps_residential)),                 # geom_vline adds vertical lines.  We want this layer to
+              color = "red", linetype = "dashed", size = 1 )                    # behave differently, so we make adjustments to its aes() call.
+                                                                                # instead of changing its x value with every observation, we want
+                                                                                # it's static position to be median(gps_residential)
+
+# Moving on...
+histplot1 <- histplot1 + 
+  geom_vline(aes(xintercept=median(gps_residential)), 
+              color = "red", linetype = "dashed", size = 1 )
+
+png(file=paste0(fp_figures, "histogram_ex_iter_3", ".png"), 
+    width = 8, height = 5, unit = "in", res = 225, antialias = "cleartype")
+
+histplot1
+
+dev.off()
+``` 
+### IQR ranges
+
+```{r IQR_ranges}
+ 
+# Tip #3 continued: central tendency indicators (IQR)
+histplot1 + annotate("rect",                                          # single plot? annotate() is the easiest to use.
+              xmin = quantile(sdph$gps_residential, probs = 0.25),    # Annotate takes no information from the original ggplot, so every x,y
+              xmax = quantile(sdph$gps_residential, probs = 0.75),    # so every x,y must be defined.
+              ymin = 0,                                               # quantile(sdph$gps_residential, probs = 0.25) returns the x value that
+              ymax = 40,                                              # has 25% of the data points below it.
+              alpha = .1, fill="blue")
+  
+histplot1 + annotate("rect", 
+              xmin = quantile(sdph$gps_residential, probs = 0.10), 
+              xmax = quantile(sdph$gps_residential, probs = 0.90), 
+              ymin = 0,                                                         # ymin you usually want zero
+              ymax = 40,                                                        # ymax is trial and error, or you can define with complex function
+              alpha = .1, fill="blue")
+
+# Can also use annotate for general highlighting   
+histplot1 + annotate("rect",                                                    # for this one, I just experimented with different coordinates.
+              xmin = -0.02, 
+              xmax = 0.075, 
+              ymin = 0, 
+              ymax = 10, 
+              alpha = .1, fill="yellow")
+ 
+# Moving on...
+histplot2 <- histplot1 + annotate("rect",                                                  
+              xmin = quantile(sdph$gps_residential, probs = 0.25),              
+              xmax = quantile(sdph$gps_residential, probs = 0.75),              
+              ymin = 0,                                                         
+              ymax = 40,                                                        
+              alpha = .1, fill="blue")
+
+png(file=paste0(fp_figures, "histogram_ex_iter_4", ".png"), 
+    width = 8, height = 5, unit = "in", res = 225, antialias = "cleartype")
+
+histplot2
+
+dev.off()
+```
+
+### Rugs and color
+
+```{r rug_and_color, fig.height=6}
+
+# Tip 4: Rugs can be a great way to show additional distribution info 
+histplot2 + geom_rug()                                                          # geom rug adds tick marks for each x value
+
+histplot2 + geom_rug(sides = "tr",                                              # sides changes where the tick marks appear
+                    outside = TRUE) +                                           # outside moves the ticks outside the gray plotting area
+                    coord_cartesian(clip = "off")                               # adjusting this sometimes fixes really tiny tick marks
+
+
+histplot2 + geom_rug(aes(color = cityname),                                     # moving color inside the aes() tells ggplot2 to change the
+                    sides = "tr") +                                             # color of tick marks based on the value of cityname
+                    coord_cartesian(clip = "off")  
+
+
+# Moving on...(and adding some color)
+
+histplot3 <- ggplot(data = sdph, aes(gps_residential,                           # Inside the aes() of the main plot, add
+                                    fill = cityname,                            # fill = cityname and color = cityname.
+                                    color = cityname)) +                        # ggplot will now assign colors to different  
+  scale_x_continuous(                                                           # values in this column
+        labels = scales::percent) +                                    
+  ggtitle("Weekday Hours at Home In Two Southwest Cities, 100 Days Of Change After 3/9/20",               
+        subtitle = "100 citywide weekday averages from san diego and phoenix, compared to january '20 median levels" ) +          
+        xlab("Daily Changes in Hours Home (Each Weekday vs. Jan Median)") +
+        ylab("No. of Days") +
+  geom_histogram(
+        alpha = 0.5, 
+        bins = 20) +    
+  geom_vline(aes(xintercept=median(gps_residential), size = "Median"),          # inside the aes of the median line, we add
+        linetype = "dashed",                                                    # size = "Median" to have ggplot2 assign
+        color = "red" ) +                                                       # the size legend to this geom
+  scale_size_manual("", values=1,                                               # force the color and size values here.
+        guide=guide_legend(override.aes = list(color=c("red"), linetype = "solid"))) +                 
+  annotate("rect", fill = "blue",                                                
+        xmin = quantile(sdph$gps_residential, probs = 0.25),              
+        xmax = quantile(sdph$gps_residential, probs = 0.75),              
+        ymin = 0,                                                         
+        ymax = 40,                                                        
+        alpha = .1) +
+  geom_rug(aes(color = cityname),                                     
+        sides = "tr") +                                             
+        coord_cartesian(clip = "off") +  
+        labs(fill="") +                                                         # This hides just the legend title.  Have to do it here
+        labs(color="")                                                          # too, ggplot makes 2 legends, fill\color.
+
+
+png(file=paste0(fp_figures, "histogram_2pop_ex", ".png"), 
+    width = 8, height = 5, unit = "in", res = 225, antialias = "cleartype")
+
+histplot3
+
+dev.off()
+```
+
+### Grids of histograms (a.k.a. multiples, marginals, facets)
+
+```{r dataframe_creation}
+# to make it a bit more interesting, add back a few cities
+cities <- filter(city_wk,                                                       # adding more 5 cities above the average, 5 cities
+               between(yday(date), 69, 208) & cityname == "San Francisco" |     # below the average (based on mean bar chart above)
+               between(yday(date), 69, 208) & cityname == "New York City" |
+               between(yday(date), 69, 208) & cityname == "Miami" |
+               between(yday(date), 69, 208) & cityname == "San Diego" |
+               between(yday(date), 69, 208) & cityname == "Portland" |
+               between(yday(date), 69, 208) & cityname == "Baltimore" |
+               between(yday(date), 69, 208) & cityname == "Phoenix" |
+               between(yday(date), 69, 208) & cityname == "Jacksonville" |
+               between(yday(date), 69, 208) & cityname == "Memphis" |
+               between(yday(date), 69, 208) & cityname == "Tulsa" )
+
+# we're going to need this later...add columns for median and IQR values
+cities <- group_by(cities, cityname) %>%                                        # groupby() groups the dataset by cityname
+  mutate(med = median(gps_residential)) %>%                                     # mutate() then adds columns with matching entries
+  mutate(IQR1 = quantile(gps_residential, probs = 0.25)) %>%                    # within groups. ie, one median for each city, repeated
+  mutate(IQR2 = quantile(gps_residential, probs = 0.75))                        # in each daily record of that city.
+```
+
+```{r small_multiples, fig.width = 20, fig.height = 10}
+
+# Tip 5: Small multiples, marginals, facets, whatever you want to call it!
+
+ggplot(data = cities, aes(gps_residential, fill=cityname)) +                    # fill=cityname in the aes() of ggplot will pass this to
+                                                                                # lower layers. 
+  geom_rect(data = cities, inherit.aes = FALSE,                                 # 
+     aes(xmin = IQR1, xmax = IQR2, ymin=0, ymax=40, group = cityname),          # we have to swap out annotate for geom_rect.
+     fill = "#8496E4", alpha=0.01) +                                            # by mapping our new x and y columns inside its aes(), the 
+                                                                                # geom is now taking its x values from our new columns. 
+  geom_histogram(alpha = 0.5, bins = 20) +                                      # This is not an ideal way to highlight IQR ranges, because
+                                                                                # a rectangle is drawn for each data point, causing 
+                                                                                # transparency issues. That is why it is
+                                                                                # moved up in the ggplot stack.
+
+  ggtitle("Weekday Hours at Home In Ten Select Cities, 100 Days Of Change After 3/9/20",               
+        subtitle = "100 citywide weekday averages from 10 select cities, compared to january '20 median levels" ) +          
+        xlab("Daily Changes in Hours Home (Each Weekday vs. Jan Median)") +
+        ylab("No. of Days") +
+  
+  
+                                                                                #
+  geom_vline(aes(xintercept = med, group = cityname),                           # we must map the median line's x value to the new column.
+              color = "red", linetype = "dashed", size = 1 ) +                  # group = cityname tells ggplot to calculate for the group.
+                                                                                # 
+  facet_wrap(~ cityname, ncol=5)                                                # facet_wrap makes a new plot for each cityname. ncol is 
+                                                                                # the number of columns of the graphic.
+
+
+# we need this data frame of IQRs to make alpha work a bit better.
+IQRs <- cities[!duplicated(cities$cityname), ]                                  # Here's a better method for making IQRs
+                                                                                # we need to create a separate data frame with just 1 record
+                                                                                # per city, and map it only to the geom_rect layer.
+histplot4 <- ggplot(data = cities, aes(gps_residential, fill=cityname)) + 
+  scale_x_continuous(labels = scales::percent) +    
+  geom_histogram(alpha = 0.5, bins = 20) +
+  geom_vline(aes(xintercept = med, group = cityname), 
+             color = "red", linetype = "dashed", size = 1, alpha = 0.8) +
+  
+  geom_rect(data = IQRs, inherit.aes = FALSE,                                   # we can map a dataset to one layer only.
+            aes(xmin = IQR1, xmax = IQR2, ymin=0, ymax=40, group = cityname),  
+                fill = "blue", alpha=0.10) +  
+  geom_rug(aes(color = cityname)) +
+    ggtitle("Weekday Hours at Home In Ten Select Cities, 100 Days Of Change After 3/9/20",               
+        subtitle = "100 citywide weekday averages from 10 select cities, compared to january '20 median levels" ) +          
+        xlab("Daily Changes in Hours Home (Each Weekday vs. Jan Median)") +
+        ylab("No. of Days") + 
+  facet_wrap(~ cityname, ncol=5) 
+
+histplot4
+
+# I'm going to add region labels to each facet.  
+# Here is the most flexible way to add text labels per facet, set up a table!
+plot_text <- data.frame(
+  label    = c("(Northeast)", "(South)",   "(South)", "(South)", "(Northeast)",  "(West)",  "(West)",   "(West)",    "(West)",   "(South)"),
+  cityname = c("Baltimore", "Jacksonville", "Memphis", "Miami", "New York City", "Phoenix","Portland", "San Diego", "San Francisco", "Tulsa"),
+  x        = c(0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15),
+  y        = c(42, 42, 42, 42, 42, 42, 42, 42, 42, 42))
+  
+  
+  
+# Let's move on, with a bit more style.  
+histplot5 <- histplot4 + geom_text(data= plot_text,                             # On the left, we position by table value
+                                   aes(x = x, y = y, label = label),            # The data frame we just created is mapped to the text
+                                   size = 3) +                                  # layer only.
+                                                                                # 
+                         theme_minimal() +                                      # if you don't have time to tweak every detail,                                                                                                                         # theme_minimal() is a good bet for facets.
+  
+                         theme(legend.position = "none") +                      # If you want to remove a legend, position = "none"  
+                 
+                         theme(strip.text =                                     # Modify text of Facets.
+                         element_text(face="bold", size=12,lineheight=5.0))     # You can modify everything in ggplot2. Some mods are   
+                                                                                # easier than others. 
+
+png(file=paste0(fp_figures, "histogram_10pop_ex", ".png"), width = 13, height = 8, unit = "in", res = 225, antialias = "cleartype")
+
+histplot5
+
+dev.off()
+```
+
+### Animated Histograms
+
+```{r animated_hist, fig.width = 20, fig.height = 10}
+# Tip 6: Animation isn't so hard. In this case, it affords us the ability to look at a time lapse of sorts.
+
+fp_output <- "~/GitHub/exercise-histogram-visualization/output/"
+
+
+# Let's organize by region (roughly)
+stateid$statename                                                               # getting the order of states, to add region identifiers.
+
+# a manual list, I couldn't think of a better way for you to follow along! 
+regions <-data.frame(c("South","West", "West","South","West","West","Northeast","Northeast","Northeast","South","South","West","West","Midwest","Midwest","Midwest","Midwest","South","South","Northeast","Northeast","Northeast","Midwest","Midwest","South","Midwest","West","Midwest","West","Northeast","Northeast","West","Northeast","South","Midwest","Midwest","South","West","Northeast","Northeast","South","Midwest","South","South","West","Northeast","South","West","Midwest","Midwest","West"))
+
+# The default column name is annoying, let's change it.
+colnames(regions) <- "region"
+
+# gluing together region ids
+stateid <- cbind(stateid, region = regions$region)                              # cbind() is used to combine columns of data frames. Here,
+                                                                                # renaming the region column at the same time.
+
+#New, compact data frame for our regional look.
+regional <- left_join(state_wk, stateid, by = "statefips")                      # rebinding our identifiers like before, but now with an
+                                                                                # added region identifier.
+
+regional_wk <- dplyr::select(regional, 
+                             date,                                              # select() returns all rows of the selected 
+                             statename = statename.x,                           # the columns of a data frame.
+                             region, 
+                             gps_residential)  
+
+#filter a new, larger date range.                                               # filter() and select() are powerful tools together!.
+regional_test <- filter(regional_wk, between(isoweek(date), 10, 31))            # Notice I am filtering even more weeks now, from Mar 3 to
+                                                                                # Jul 31 
+
+# making the columns needed for the IQR geom_rect().
+regional_test <- group_by(regional_test, region, isoweek(date)) %>%             #
+  mutate(med = median(gps_residential)) %>%                                     # The last mutate() adds a column we haven't seen
+  mutate(IQR1 = quantile(gps_residential, probs = 0.25)) %>%                    # check the grouping done. We find that
+  mutate(IQR2 = quantile(gps_residential, probs = 0.75)) %>%                    # some regions have different observations due to
+  mutate(n = length(gps_residential))                                           # having a different number of member states...                          
+
+# check resulting data frame.                                                   # we need to use a density histogram. More on this later.
+head(regional_test)                                                             # first, ugly column names!
+
+colnames(regional_test) <- c("date", "state", "region", "time_in_home", "week", "med", "IQR25", "IQR75", "n")
+
+# build the animation by layer.
+anim <- ggplot(data = regional_test, aes(x=time_in_home, fill=region)) +        # note: changed column titles in previous step.
+  
+  scale_x_continuous(labels = scales::percent) + 
+  scale_y_continuous(labels = scales::percent) +                                # scale both axis as continuous percent now.
+  geom_rect(data = regional_test, inherit.aes = FALSE,                          # need to use the less ideal method of IQR highlighting
+            aes(xmin = IQR25, xmax = IQR75, ymin=0, ymax=0.5, group = region),  
+            fill = "#8496E4", alpha=0.00589) +                                  # trial and error fill and alpha values.
+# note: now a density histogram
+  geom_histogram(aes(y=(..density..)*0.015), binwidth = 0.015,                  # because there are a different number of records between,
+                 alpha = 0.5) +                                                 # regions, we must add aes(y=..density..) to our histogram.
+                                                                                # we must set out binwidth here, and multiply ..density.. by
+                                                                                # our binwidth to rescale the y axis.
+                                                                                # this will report percentage of total count, rather than
+                                                                                # count.
+  geom_vline(aes(xintercept = med, group = region), 
+             color = "red", linetype = "dashed", size = 1, alpha = 0.8) +  
+  
+  facet_wrap(~ region, ncol=4) +                                                # changed number of columns on display.
+  
+  geom_rug(aes(color = region)) + 
+ 
+  theme_minimal() +                                                                                                                                                
+  theme(legend.position = "none") +                      
+                                                                                # regarding ggtitle below!
+  theme(strip.text = element_text(face="bold", size=12,lineheight=5.0)) +       # \n Week: {closest_state} will display week
+                                                                                # because we will map our animation transition to week.
+  ggtitle("Weekday Hours at Home By U.S. Region, 3/2/20 - 7/31/20 Weekly Snapshot \n Week: {closest_state}",               
+        subtitle = "weekday avgs (by day) for all u.s. states, grouped by region, compared to jan '20 median levels" ) +          
+        
+  xlab("Daily Changes in Hours Home (Each Weekday vs. Jan Median)") +
+  
+  ylab("Percent of Total Days") +                                               # change y axis label, due to density histogram
+  
+  transition_states(week, transition_length = 1, state_length = 8)              # transition_states() turns the plot into an animation
+                                                                                # the simplest way to define an animation is shown.
+rendered.animation <- gganimate::animate(anim,                                             # Think of state_length() and transition_length() as a
+                              duration = 60,                                    # ratio of the total duration set in animate().
+                              fps = 24,                                         # Careful, large values here can cause the animation to take
+                              height = 900,                                     # a long time to render!
+                              width = 1600,
+                              start_pause = 3,                                  # small pause of first week
+                              end_pause = 3,                                    # small pause on second week
+                              rewind = TRUE                                     # play the animation backwards, at the end.
+                              )              
+
+anim_save(filename = paste0(fp_output, "timeinhomehistograms.gif"), 
+          animation = rendered.animation)
+```
+##Top Ten Things I Think are Worth Remembering
+
+1) Filter()/Select()/Group_by()
+
+2) Always Add Alpha
+
+3) Medians and IQRs
+
+4) The default, Pretty(Sturges) bin size function.  Also, binwidth = weirdbins!
+
+5) Rugs and color grouping
+
+6) Small Multiples with facets (theme_minimal())
+
+7) Building a basic animation with gganimate
+
+8) Different counts? Density histogram!
+
+9) Adding text with geom_text(), and other major labels to ggplots. 
+
+10) Histograms aren't bar charts!
