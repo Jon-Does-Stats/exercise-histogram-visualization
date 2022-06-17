@@ -4,7 +4,7 @@
 ## Primary languages
 - R
 
-## Highlighted Visualizations
+## Highlighted visualizations
 - (below) A scatterplot of the data, selected for its peculiarity.  
 <img src="https://raw.githubusercontent.com/Jon-Does-Stats/exercise-histogram-visualization/main/figures/scatterplot_all_data.png" width=675>
 
